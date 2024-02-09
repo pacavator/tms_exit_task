@@ -1,0 +1,80 @@
+pipeline {
+    agent any 
+       stages {
+        stage('Preparing_infra') {
+            steps {
+                sh '''
+                rm -rf *
+                git clone https://${username}@github.com/tms-dos17-onl/stas-borsukov.git --branch fintask
+                cd stas-borsukov/eShopOnContainers/terraform
+                if [ -d ~/eshopterraform ]; then
+		          echo "Directory ~/eshopterraform exists, updating infra!"
+		          cp -rf * ~/eshopterraform
+		          cd ~/eshopterraform
+	        	  terraform plan
+                  terraform apply -auto-approve
+        		else
+	        	  echo "Directory ~/eshopterraform NOT exists, creating infra from it!"
+	        	  mkdir ~/eshopterraform
+	        	  cp -rf * ~/eshopterraform
+	        	  cd ~/eshopterraform
+	        	  terraform init
+	        	  terraform plan
+                  terraform apply -auto-approve
+                  ssh-keygen -f ~/.ssh/known_hosts -R $(cat static_ip.info)
+                  sleep 15
+                  ssh -o StrictHostKeyChecking=no $(whoami)@$(cat static_ip.info) 'bash -s' < docker_install.sh
+	        	fi
+                '''
+                sh 'cp ~/eshopterraform/static_ip.info .'
+                stash includes: 'static_ip.info' , name: 'static_ip'
+                }
+        }
+        stage('Copy_files') {
+            steps {
+               unstash name: 'static_ip'
+               sh '''
+               echo "ESHOP_EXTERNAL_DNS_NAME_OR_IP=$(cat static_ip.info)" > stas-borsukov/eShopOnContainers/src/.env
+               echo "ESHOP_STORAGE_CATALOG_URL=http://$(cat static_ip.info):5202/c/api/v1/catalog/items/[0]/pic/" >> stas-borsukov/eShopOnContainers/src/.env
+               cat stas-borsukov/eShopOnContainers/src/.env
+               ssh-keygen -f ~/.ssh/known_hosts -R $(cat static_ip.info)
+               tar -zcvf archive-name.tar.gz stas-borsukov/eShopOnContainers
+               scp -o StrictHostKeyChecking=no -r archive-name.tar.gz $(whoami)@$(cat static_ip.info):./
+               ssh -o StrictHostKeyChecking=no $(whoami)@$(cat static_ip.info) 'tar -zxvf archive-name.tar.gz'
+               '''
+            }
+         
+        }
+        stage('Compose_build') {
+           steps {
+               unstash name: 'static_ip'
+             sh '''
+             ssh -o StrictHostKeyChecking=no $(whoami)@$(cat static_ip.info) 'docker compose -f stas-borsukov/eShopOnContainers/src/docker-compose.yml build'
+             '''
+            }
+        }
+        stage('Publish') {
+            steps {
+                sh '''
+                echo "start Publish section"
+                ssh -o StrictHostKeyChecking=no $(whoami)@$(cat static_ip.info) \
+                'docker compose \
+                -f stas-borsukov/eShopOnContainers/src/docker-compose.yml \
+                -f stas-borsukov/eShopOnContainers/src/docker-compose.override.yml up --detach'
+                sleep 15
+                cat stas-borsukov/eShopOnContainers/1
+                '''
+            }
+        }
+    }
+post {
+        always {
+            echo 'I will always say Hello again!'
+            
+            emailext body: "${currentBuild.currentResult}: Job ${env.JOB_NAME} build ${env.BUILD_NUMBER}\n More info at: ${env.BUILD_URL}",
+                recipientProviders: [[$class: 'DevelopersRecipientProvider'], [$class: 'RequesterRecipientProvider']],
+                subject: "Jenkins Build ${currentBuild.currentResult}: Job ${env.JOB_NAME}"
+            
+        }
+    }
+}
